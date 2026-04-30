@@ -92,8 +92,8 @@ public sealed class BulkUploadStatementHandler : IRequestHandler<BulkUploadState
                     StoragePath = ""
                 };
 
-                var storagePath = await _fileStorage.StoreAsync(upload.Id, content, cancellationToken);
-                upload.StoragePath = storagePath;
+                var storageResult = await _fileStorage.SaveAsync(fileName, content, cancellationToken);
+                upload.StoragePath = storageResult.StoragePath;
 
                 _dbContext.DocumentUploads.Add(upload);
                 await _dbContext.SaveChangesAsync(cancellationToken);

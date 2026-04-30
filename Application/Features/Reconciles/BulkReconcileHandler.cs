@@ -1,5 +1,7 @@
 using MediatR;
 using ReconcileDocs.Application.Abstractions;
+using ReconcileDocs.Contracts.RequestModels.Reconciles;
+using ReconcileDocs.Contracts.ResponseModels.Reconciles;
 using ReconcileDocs.Domain.Entities;
 
 namespace ReconcileDocs.Application.Features.Reconciles;
