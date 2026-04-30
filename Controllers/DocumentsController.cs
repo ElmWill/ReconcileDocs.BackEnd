@@ -36,6 +36,31 @@ public sealed class DocumentsController : ControllerBase
         return Ok(result);
     }
 
+    [HttpPost("bulk-statements")]
+    [Consumes("multipart/form-data")]
+    public async Task<ActionResult<BulkUploadStatementsResult>> BulkUploadStatements(
+        [FromForm] IReadOnlyList<IFormFile> files,
+        [FromForm] Guid spreadsheetUploadId,
+        CancellationToken cancellationToken)
+    {
+        var fileContents = new List<byte[]>();
+        var fileNames = new List<string>();
+        var contentTypes = new List<string>();
+
+        foreach (var file in files)
+        {
+            await using var memoryStream = new MemoryStream();
+            await file.CopyToAsync(memoryStream, cancellationToken);
+            fileContents.Add(memoryStream.ToArray());
+            fileNames.Add(file.FileName);
+            contentTypes.Add(file.ContentType);
+        }
+
+        var command = new BulkUploadStatementCommand(fileContents, fileNames, contentTypes, spreadsheetUploadId);
+        var result = await _mediator.Send(command, cancellationToken);
+        return Ok(result);
+    }
+
     [HttpPost("reconcile")]
     public async Task<ActionResult<StartReconcileResult>> Reconcile([FromBody] StartReconcileCommand request, CancellationToken cancellationToken)
     {
@@ -54,6 +79,15 @@ public sealed class DocumentsController : ControllerBase
     public async Task<ActionResult<ReconcileProgressResult>> GetReconcileProgress(Guid id, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetReconcileProgressQuery(id), cancellationToken);
+        return Ok(result);
+    }
+
+    [HttpPost("reconcile/bulk")]
+    public async Task<ActionResult<BulkReconcileResult>> BulkReconcile(
+        [FromBody] BulkReconcileCommand request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(request, cancellationToken);
         return Ok(result);
     }
 
