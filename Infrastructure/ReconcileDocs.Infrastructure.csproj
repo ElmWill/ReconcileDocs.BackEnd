@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.3" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.3" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
+    <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Application\ReconcileDocs.Application.csproj" />
+    <ProjectReference Include="..\Domain\ReconcileDocs.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

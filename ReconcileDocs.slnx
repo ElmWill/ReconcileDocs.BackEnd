@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="ReconcileDocs.csproj" />
+  <Project Path="Application\ReconcileDocs.Application.csproj" />
+  <Project Path="Contracts\ReconcileDocs.Contracts.csproj" />
+  <Project Path="Domain\ReconcileDocs.Domain.csproj" />
+  <Project Path="Infrastructure\ReconcileDocs.Infrastructure.csproj" />
+</Solution>

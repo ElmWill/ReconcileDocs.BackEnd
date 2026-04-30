@@ -1,0 +1,6 @@
+@ReconcileDocs_HostAddress = http://localhost:5090
+
+GET {{ReconcileDocs_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
