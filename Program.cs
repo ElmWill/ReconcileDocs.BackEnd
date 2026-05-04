@@ -40,10 +40,18 @@ builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBeh
 
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddScoped<IStatementParserResolver, StatementParserResolver>();
+builder.Services.AddHttpClient<ReconcileDocs.Infrastructure.AI.OllamaStatementModelExtractor>();
+builder.Services.AddSingleton<ReconcileDocs.Infrastructure.AI.ILastModelResponseStore, ReconcileDocs.Infrastructure.AI.LastModelResponseStore>();
+builder.Services.AddScoped<IStatementModelExtractor, ReconcileDocs.Infrastructure.AI.OllamaStatementModelExtractor>();
+builder.Services.AddScoped<IPdfOcrTextExtractor, ReconcileDocs.Infrastructure.AI.WindowsPdfOcrTextExtractor>();
 builder.Services.AddScoped<IStatementParser, ExcelStatementParser>();
 builder.Services.AddScoped<IStatementParser, PdfStatementParser>();
 builder.Services.AddScoped<IStatementParser, TemplateStatementParser>();
 builder.Services.AddScoped<IStatementParser, GenericStatementParser>();
+
+// in-memory cache for reconcile progress
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<ReconcileDocs.Contracts.Abstractions.IReconcileProgressCache, ReconcileDocs.Infrastructure.Caching.ReconcileProgressCache>();
 
 // background reconcile queue and processor
 builder.Services.AddSingleton<ReconcileDocs.Application.Abstractions.IBackgroundTaskQueue, ReconcileDocs.Infrastructure.Background.BackgroundTaskQueue>();

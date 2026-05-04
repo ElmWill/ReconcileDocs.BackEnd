@@ -64,7 +64,7 @@ public sealed class DocumentsController : ControllerBase
     [HttpPost("reconcile")]
     public async Task<ActionResult<StartReconcileResult>> Reconcile([FromBody] StartReconcileCommand request, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(request, cancellationToken);
+        var result = await _mediator.Send(new EnqueueReconcileCommand(request.SpreadsheetUploadId, request.StatementUploadId, request.Password), cancellationToken);
         return Ok(result);
     }
 
@@ -79,6 +79,14 @@ public sealed class DocumentsController : ControllerBase
     public async Task<ActionResult<ReconcileProgressResult>> GetReconcileProgress(Guid id, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetReconcileProgressQuery(id), cancellationToken);
+        return Ok(result);
+    }
+
+    [HttpGet("reconcile/{id}/matches")]
+    public async Task<ActionResult<GetReconcileMatchesResult>> GetReconcileMatches(Guid id, [FromQuery] int? pageNumber, [FromQuery] int? pageSize, [FromQuery] bool? matchedOnly, CancellationToken cancellationToken)
+    {
+        var query = new GetReconcileMatchesQuery { RunId = id, PageNumber = pageNumber, PageSize = pageSize, MatchedOnly = matchedOnly };
+        var result = await _mediator.Send(query, cancellationToken);
         return Ok(result);
     }
 

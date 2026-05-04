@@ -17,6 +17,18 @@ public interface IStatementParserResolver
     IStatementParser Resolve(DocumentUpload upload, TemplateDefinition? template = null);
 }
 
+public interface IStatementModelExtractor
+{
+    Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsAsync(string documentText, CancellationToken cancellationToken = default);
+}
+
+public interface IPdfOcrTextExtractor
+{
+    Task<IReadOnlyList<string>> ExtractPageTextsAsync(string pdfPath, string? password = null, CancellationToken cancellationToken = default);
+}
+
+public sealed record PdfParseTrace(int PdfTextLineCount, int OcrTextLineCount, int ModelRowCount);
+
 public sealed record ParsedStatementRow(int RowNumber, string Description, decimal Amount, DateOnly? TransactionDate);
 
 public sealed record ParsedStatementResult(IReadOnlyList<ParsedStatementRow> Rows);

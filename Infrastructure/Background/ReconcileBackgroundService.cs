@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using ReconcileDocs.Application.Abstractions;
 using ReconcileDocs.Application.Services;
 using Microsoft.EntityFrameworkCore;
@@ -10,11 +11,13 @@ public sealed class ReconcileBackgroundService : BackgroundService
 {
     private readonly IBackgroundTaskQueue _queue;
     private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<ReconcileBackgroundService> _logger;
 
-    public ReconcileBackgroundService(IBackgroundTaskQueue queue, IServiceProvider serviceProvider)
+    public ReconcileBackgroundService(IBackgroundTaskQueue queue, IServiceProvider serviceProvider, ILogger<ReconcileBackgroundService> logger)
     {
         _queue = queue;
         _serviceProvider = serviceProvider;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -42,9 +45,10 @@ public sealed class ReconcileBackgroundService : BackgroundService
             {
                 break;
             }
-            catch
+            catch (Exception ex)
             {
-                // best effort: log or handle exception, continue processing
+                // Log and continue processing next job
+                _logger.LogError(ex, "Reconcile background worker failed processing a job");
             }
         }
     }
