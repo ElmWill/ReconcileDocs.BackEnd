@@ -39,13 +39,7 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
         }
 
         var trimmedText = documentText.Length > 30000 ? documentText[..30000] : documentText;
-        _logger.LogDebug("Ollama: full input text length={TextLength}\n--- BEGIN INPUT ---\n{Text}\n--- END INPUT ---",
-            documentText.Length, documentText);
-        if (trimmedText.Length < documentText.Length)
-        {
-            _logger.LogDebug("Ollama: input was truncated to {TrimmedLength} characters for the model request", trimmedText.Length);
-        }
-        
+
         var prompt = BuildPrompt(trimmedText);
 
         try
@@ -68,7 +62,6 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
             
             // Store the raw response for diagnostic endpoint
             _lastResponseStore.SetLastResponse("last", responseText);
-            _logger.LogDebug("Ollama raw response: {ResponseText}", responseText);
             
             if (string.IsNullOrWhiteSpace(responseText))
             {

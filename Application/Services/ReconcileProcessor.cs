@@ -56,7 +56,7 @@ public sealed class ReconcileProcessor
             var parsedSpreadsheet = await spreadsheetParser.ParseAsync(spreadsheetUpload, spreadsheetBytes, password, cancellationToken);
             var parsedStatement = await statementParser.ParseAsync(statementUpload, statementBytes, password, cancellationToken);
 
-            run.ParserName = $"{SanitizeForDb(spreadsheetParser.ParserKey, 50)}/{SanitizeForDb(statementParser.ToString(), 100)}[{parsedStatement.Rows.Count}]";
+            run.ParserName = $"{SanitizeForDb(spreadsheetParser.ParserKey, 50)}/{SanitizeForDb(statementParser.ParserKey, 50)}";
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             var spreadsheetRows = parsedSpreadsheet.Rows

@@ -90,6 +90,21 @@ public sealed class DocumentsController : ControllerBase
         return Ok(result);
     }
 
+    [HttpGet("reconcile/{id}/matched-data")]
+    public async Task<ActionResult<GetReconcileMatchesResult>> GetMatchedData(Guid id, [FromQuery] int? pageNumber, [FromQuery] int? pageSize, CancellationToken cancellationToken)
+    {
+        var query = new GetReconcileMatchesQuery
+        {
+            RunId = id,
+            PageNumber = pageNumber,
+            PageSize = pageSize,
+            MatchedOnly = null
+        };
+
+        var result = await _mediator.Send(query, cancellationToken);
+        return Ok(result);
+    }
+
     [HttpPost("reconcile/bulk")]
     public async Task<ActionResult<BulkReconcileResult>> BulkReconcile(
         [FromBody] BulkReconcileCommand request,

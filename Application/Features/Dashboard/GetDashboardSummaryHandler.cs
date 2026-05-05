@@ -20,8 +20,8 @@ public sealed class GetDashboardSummaryHandler : IRequestHandler<GetDashboardSum
         var uploadedDocuments = await _dbContext.DocumentUploads.CountAsync(cancellationToken);
         var reconcileRuns = await _dbContext.ReconcileRuns.CountAsync(cancellationToken);
         var activeTemplates = await _dbContext.TemplateDefinitions.CountAsync(template => template.IsActive, cancellationToken);
-        var successfulRuns = await _dbContext.ReconcileRuns.CountAsync(run => run.Status == 1, cancellationToken);
-        var failedRuns = await _dbContext.ReconcileRuns.CountAsync(run => run.Status == 2, cancellationToken);
+        var successfulRuns = await _dbContext.ReconcileRuns.CountAsync(run => run.Status == 2, cancellationToken);
+        var failedRuns = await _dbContext.ReconcileRuns.CountAsync(run => run.Status == 3, cancellationToken);
 
         return new DashboardSummaryResult(uploadedDocuments, reconcileRuns, activeTemplates, successfulRuns, failedRuns);
     }
