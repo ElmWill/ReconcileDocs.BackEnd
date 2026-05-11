@@ -38,7 +38,8 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
             return Array.Empty<ParsedStatementRow>();
         }
 
-        var trimmedText = documentText.Length > 30000 ? documentText[..30000] : documentText;
+        // Allow up to 500KB of text for better extraction of large spreadsheets
+        var trimmedText = documentText.Length > 500000 ? documentText[..500000] : documentText;
 
         var prompt = BuildPrompt(trimmedText);
 
@@ -85,11 +86,14 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
     private static string BuildPrompt(string text)
     {
                 return """
-You are an AI expert tasked with extracting structured transaction data from the attached credit card statement.
+You are an AI expert tasked with extracting structured transaction data from the attached credit card or expense statement.
 
-RULES:
-- Analyze only the provided statement text.
+CRITICAL INSTRUCTIONS:
+- EXTRACT EVERY SINGLE TRANSACTION without omitting any rows (no sampling, no filtering for "important" ones).
 - Respond ONLY with valid JSON. Do not include any additional commentary, markdown, code fences, or explanations.
+
+RULES FOR PARSING:
+- Analyze only the provided statement text.
 - Preserve the original transaction order as it appears in the document.
 - This statement may be OCR-extracted as separated columns instead of clean rows.
 - When the text is column-split, reconstruct each transaction by following the visible sequence of entries in order, not by trying to infer relationships from nearby words.
@@ -100,7 +104,8 @@ RULES:
 - Never guess, merge, or reassign amounts to a different row.
 - Never move an amount from one transaction to another, even if lines appear split.
 - Ignore headers, footers, legal text, page numbers, summary rows, balance rows, and minimum payment rows.
-- Return an empty array if no transactions are found.
+- IMPORTANT: Exclude/skip any transactions where the category or description contains "Domain" (domain payments do not apply to reconciliation).
+- Return an empty array ONLY if genuinely no transactions are found.
 - amount must be positive for charges and negative for refunds or credits.
 - Use a dot as the decimal separator and omit currency symbols or thousand separators.
 
@@ -116,7 +121,7 @@ EXPECTED JSON STRUCTURE:
 }
 
 REFERENCE NOTE:
-The statement text may include separate blocks for transaction dates, posting dates, descriptions, and amounts. In that case, treat them as one table and keep the row order aligned by position.
+The statement text may include separate blocks for transaction dates, posting dates, descriptions, and amounts. In that case, treat them as one table and keep the row order aligned by position. Ensure you extract ALL data rows, not just a sample.
 
 Statement text:
 """ + text;
@@ -167,6 +172,12 @@ Statement text:
 
             var description = (descEl.GetString() ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(description))
+            {
+                continue;
+            }
+
+            // Filter out Domain payments
+            if (description.Contains("Domain", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
