@@ -55,13 +55,11 @@ public sealed class GetReconcileMatchesHandler : IRequestHandler<GetReconcileMat
             query = query.Where(item => item.Match.IsMatched == request.MatchedOnly.Value);
         }
 
-        var total = await query.CountAsync(cancellationToken);
-
-        var matches = await query
+        // Parsed rows can be written multiple times for the same upload across runs.
+        // Deduplicate by match id so a repeated reconciliation of the same files does not multiply rows in the UI.
+        var deduped = await query
             .OrderByDescending(item => item.Match.IsMatched)
             .ThenBy(item => item.Match.StatementRowNumber)
-            .Skip(skip)
-            .Take(pageSize)
             .Select(item => new ReconcileMatchDto(
                 item.Match.Id,
                 item.Match.SpreadsheetRowNumber,
@@ -76,6 +74,17 @@ public sealed class GetReconcileMatchesHandler : IRequestHandler<GetReconcileMat
                 item.StatementRow != null ? item.StatementRow.Amount : item.Match.Amount,
                 item.StatementRow != null ? item.StatementRow.TransactionDate : null))
             .ToListAsync(cancellationToken);
+
+        var uniqueMatches = deduped
+            .GroupBy(item => item.Id)
+            .Select(group => group.First())
+            .ToList();
+
+        var total = uniqueMatches.Count;
+        var matches = uniqueMatches
+            .Skip(skip)
+            .Take(pageSize)
+            .ToList();
 
         return new GetReconcileMatchesResult(matches, total);
     }

@@ -33,6 +33,11 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
 
     public async Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsAsync(string documentText, CancellationToken cancellationToken = default)
     {
+        return await ExtractTransactionsWithContextAsync(documentText, null, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, CancellationToken cancellationToken = default)
+    {
         if (string.IsNullOrWhiteSpace(documentText))
         {
             return Array.Empty<ParsedStatementRow>();
@@ -41,7 +46,7 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
         // Allow up to 500KB of text for better extraction of large spreadsheets
         var trimmedText = documentText.Length > 500000 ? documentText[..500000] : documentText;
 
-        var prompt = BuildPrompt(trimmedText);
+        var prompt = BuildPrompt(trimmedText, masterServices);
 
         try
         {
@@ -83,14 +88,29 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
         return _configuration["Ollama:Model"] ?? "gemma4:e4b";
     }
 
-    private static string BuildPrompt(string text)
+    private static string BuildPrompt(string text, MasterServicesContext? masterServices = null)
     {
-                return """
-You are an AI expert tasked with extracting structured transaction data from the attached credit card or expense statement.
+        var masterServicesSection = string.Empty;
+        if (masterServices?.Services.Count > 0)
+        {
+            var serviceLines = masterServices.Services
+                .Where(s => !string.IsNullOrWhiteSpace(s.ServiceName))
+                .Select(s => $"- {s.ServiceName}: {s.CostIdr} IDR, Billing Cycle: {s.BillingCycle}, Payment: {s.PaymentMethod}")
+                .ToList();
+
+            if (serviceLines.Count > 0)
+            {
+                masterServicesSection = "\n\nREFERENCE SERVICES (from master billing list):\nThese services should be present in the statement for the current billing cycle:\n" 
+                    + string.Join("\n", serviceLines)
+                    + "\n\nUse these service names to intelligently match PDF transactions to expected services. If you see a transaction that matches one of these services, include it.";
+            }
+        }
+
+        return @"You are an AI expert tasked with extracting structured transaction data from credit card statements.
 
 CRITICAL INSTRUCTIONS:
-- EXTRACT EVERY SINGLE TRANSACTION without omitting any rows (no sampling, no filtering for "important" ones).
-- Respond ONLY with valid JSON. Do not include any additional commentary, markdown, code fences, or explanations.
+- EXTRACT EVERY SINGLE TRANSACTION without omitting any rows (no sampling, no filtering for ""important"" ones).
+- Respond ONLY with valid JSON. Do not include any additional commentary, markdown, code fences, or explanations." + masterServicesSection + @"
 
 RULES FOR PARSING:
 - Analyze only the provided statement text.
@@ -104,18 +124,18 @@ RULES FOR PARSING:
 - Never guess, merge, or reassign amounts to a different row.
 - Never move an amount from one transaction to another, even if lines appear split.
 - Ignore headers, footers, legal text, page numbers, summary rows, balance rows, and minimum payment rows.
-- IMPORTANT: Exclude/skip any transactions where the category or description contains "Domain" (domain payments do not apply to reconciliation).
+- IMPORTANT: Exclude/skip any transactions where the category or description contains ""Domain"" (domain payments do not apply to reconciliation).
 - Return an empty array ONLY if genuinely no transactions are found.
 - amount must be positive for charges and negative for refunds or credits.
 - Use a dot as the decimal separator and omit currency symbols or thousand separators.
 
 EXPECTED JSON STRUCTURE:
 {
-    "transactions": [
+    ""transactions"": [
         {
-            "date": "YYYY-MM-DD or null",
-            "description": "string",
-            "amount": number
+            ""date"": ""YYYY-MM-DD or null"",
+            ""description"": ""string"",
+            ""amount"": number
         }
     ]
 }
@@ -124,7 +144,7 @@ REFERENCE NOTE:
 The statement text may include separate blocks for transaction dates, posting dates, descriptions, and amounts. In that case, treat them as one table and keep the row order aligned by position. Ensure you extract ALL data rows, not just a sample.
 
 Statement text:
-""" + text;
+" + text;
     }
 
     private static IReadOnlyList<ParsedStatementRow> ParseModelRowsFromResponse(string responseText)

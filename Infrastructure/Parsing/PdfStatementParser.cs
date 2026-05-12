@@ -79,7 +79,10 @@ public sealed class PdfStatementParser : IStatementParser
             }
         }
 
-        var modelRows = await _modelExtractor.ExtractTransactionsAsync(string.Join("\n", extractedLines), cancellationToken);
+        var modelRows = await _modelExtractor.ExtractTransactionsWithContextAsync(
+            string.Join("\n", extractedLines), 
+            ExcelStatementParser.GetCurrentMasterServices(), 
+            cancellationToken);
         _lastTrace = new PdfParseTrace(extractedLines.Count, ocrLineCount, modelRows.Count);
         if (modelRows.Count > 0)
         {

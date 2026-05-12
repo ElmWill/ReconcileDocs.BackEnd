@@ -20,7 +20,12 @@ public interface IStatementParserResolver
 public interface IStatementModelExtractor
 {
     Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsAsync(string documentText, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, CancellationToken cancellationToken = default);
 }
+
+public sealed record MasterService(string ServiceName, string? BillingCycle, DateTime? BillingDate, string? PaymentMethod, string? CcNumber, decimal? CostIdr);
+
+public sealed record MasterServicesContext(IReadOnlyList<MasterService> Services);
 
 public interface IPdfOcrTextExtractor
 {
