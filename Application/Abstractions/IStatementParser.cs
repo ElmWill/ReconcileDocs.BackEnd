@@ -23,7 +23,7 @@ public interface IStatementModelExtractor
     Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, CancellationToken cancellationToken = default);
 }
 
-public sealed record MasterService(string ServiceName, string? BillingCycle, DateTime? BillingDate, string? PaymentMethod, string? CcNumber, decimal? CostIdr);
+public sealed record MasterService(int? Number, string ServiceName, string? BillingCycle, DateTime? BillingDate, string? PaymentMethod, string? CcNumber, decimal? CostIdr);
 
 public sealed record MasterServicesContext(IReadOnlyList<MasterService> Services);
 

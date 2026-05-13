@@ -264,6 +264,74 @@ public sealed class ReconcileProcessor
                 await _dbContext.SaveChangesAsync(cancellationToken);
             }
 
+            // Add ReconcileMatch entries for master services that are monthly and missing from the statement
+            try
+            {
+                MasterServicesContext? masterServices = null;
+                try
+                {
+                    var parserType = spreadsheetParser.GetType();
+                    var method = parserType.GetMethod("ExtractMasterServicesFromBytes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    if (method != null)
+                    {
+                        var result = method.Invoke(null, new object[] { spreadsheetBytes });
+                        masterServices = result as MasterServicesContext;
+                    }
+                }
+                catch (Exception rex)
+                {
+                    _logger.LogDebug(rex, "Reflection call to ExtractMasterServicesFromBytes failed");
+                    masterServices = null;
+                }
+
+                if (masterServices?.Services?.Count > 0)
+                {
+                    var existingSpreadsheetDescriptions = parsedSpreadsheet.Rows
+                        .Where(r => HasMeaningfulData(r.Description, r.Amount, r.TransactionDate))
+                        .Select(r => Normalize(r.Description))
+                        .ToHashSet();
+
+                    var missingMatches = new List<ReconcileMatch>();
+                    foreach (var svc in masterServices.Services)
+                    {
+                        if (string.IsNullOrWhiteSpace(svc.ServiceName)) continue;
+                        if (!string.Equals(svc.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase)) continue;
+                        var billingCycle = svc.BillingCycle ?? string.Empty;
+                        if (!billingCycle.Contains("monthly", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        // If any parsed spreadsheet row contains the service name, consider it present
+                        var svcNameNorm = Normalize(svc.ServiceName);
+                        var present = existingSpreadsheetDescriptions.Any(d => d.Contains(svcNameNorm));
+                        if (present) continue;
+
+                        var matchEntity = new ReconcileMatch
+                        {
+                            Id = Guid.NewGuid(),
+                            ReconcileRunId = run.Id,
+                            SpreadsheetRowNumber = svc.Number ?? 0,
+                            StatementRowNumber = 0,
+                            Description = SanitizeForDb(svc.ServiceName, 500),
+                            Amount = svc.CostIdr ?? 0m,
+                            IsMatched = false
+                        };
+
+                        missingMatches.Add(matchEntity);
+                    }
+
+                    if (missingMatches.Any())
+                    {
+                        _dbContext.ReconcileMatches.AddRange(missingMatches);
+                        await _dbContext.SaveChangesAsync(cancellationToken);
+                        run.UnmatchedCount += missingMatches.Count;
+                        await _dbContext.SaveChangesAsync(cancellationToken);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to add missing monthly master-service matches");
+            }
+
             // Update run with final counts
             run.MatchedCount = matchedCount;
             run.UnmatchedCount = unmatchedCount;

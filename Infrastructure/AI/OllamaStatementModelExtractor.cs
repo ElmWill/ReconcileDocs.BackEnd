@@ -93,20 +93,21 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
         var masterServicesSection = string.Empty;
         if (masterServices?.Services.Count > 0)
         {
-            var serviceLines = masterServices.Services
-                .Where(s => !string.IsNullOrWhiteSpace(s.ServiceName))
-                .Select(s => $"- {s.ServiceName}: {s.CostIdr} IDR, Billing Cycle: {s.BillingCycle}, Payment: {s.PaymentMethod}")
+            var creditCardNumbers = masterServices.Services
+                .Where(service => service.Number.HasValue && string.Equals(service.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase))
+                .Select(service => service.Number!.Value)
+                .Distinct()
                 .ToList();
 
-            if (serviceLines.Count > 0)
+            if (creditCardNumbers.Count > 0)
             {
-                masterServicesSection = "\n\nREFERENCE SERVICES (from master billing list):\nThese services should be present in the statement for the current billing cycle:\n" 
-                    + string.Join("\n", serviceLines)
-                    + "\n\nUse these service names to intelligently match PDF transactions to expected services. If you see a transaction that matches one of these services, include it.";
+                masterServicesSection = "\n\nREFERENCE SERVICES (from master billing list):\nOnly include rows whose No matches one of the credit-card service numbers below. Skip every other row.\n"
+                    + "Credit-card service numbers: " + string.Join(", ", creditCardNumbers) + "\n"
+                    + "Do not use service names to decide inclusion. Only output rows belonging to the allowed credit-card service numbers.";
             }
         }
 
-        return @"You are an AI expert tasked with extracting structured transaction data from credit card statements.
+        return @"You are an AI expert tasked with extracting structured transaction data from credit card statements and billing tables.
 
 CRITICAL INSTRUCTIONS:
 - EXTRACT EVERY SINGLE TRANSACTION without omitting any rows (no sampling, no filtering for ""important"" ones).
@@ -115,6 +116,10 @@ CRITICAL INSTRUCTIONS:
 RULES FOR PARSING:
 - Analyze only the provided statement text.
 - Preserve the original transaction order as it appears in the document.
+    - If the text looks like a billing sheet or service table, prefer the service name plus the IDR amount column only.
+    - If multiple currency columns exist, ignore USD, EUR, dollar, euro, and any non-IDR price columns.
+    - When extracting from a billing sheet, use Monthly Cost (IDR) first and Yearly Cost (IDR) only as a fallback when Monthly Cost (IDR) is missing or blank.
+    - Never choose a smaller decimal-style value like 22.2 or 59.14 when an IDR whole-number amount exists in the same row.
 - This statement may be OCR-extracted as separated columns instead of clean rows.
 - When the text is column-split, reconstruct each transaction by following the visible sequence of entries in order, not by trying to infer relationships from nearby words.
 - Do not merge unrelated descriptions, and do not reassign an amount to a different merchant.

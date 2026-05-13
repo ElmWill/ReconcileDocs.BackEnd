@@ -66,16 +66,21 @@ public sealed class ExcelStatementParser : IStatementParser
         try
         {
             var worksheet = SelectWorksheet(workbook);
+            var allowedCreditCardNumbers = masterServices?.Services
+                .Where(service => service.Number.HasValue && string.Equals(service.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase))
+                .Select(service => service.Number!.Value)
+                .ToHashSet();
+
             var parsedRows = ParseIdrRowsFromWorksheet(worksheet);
 
             // Prefer deterministic IDR parsing; fallback to LLM only when header mapping fails.
-            if (parsedRows.Count == 0)
+            if (parsedRows.Count == 0 && !(allowedCreditCardNumbers?.Count > 0))
             {
                 var worksheetText = ExtractWorksheetText(worksheet);
                 if (!string.IsNullOrWhiteSpace(worksheetText))
                 {
                     _logger.LogInformation("Excel deterministic parsing returned no rows for worksheet {WorksheetName}. Falling back to model extraction.", worksheet.Name);
-                    parsedRows = (await _modelExtractor.ExtractTransactionsAsync(worksheetText, cancellationToken)).ToList();
+                    parsedRows = (await _modelExtractor.ExtractTransactionsWithContextAsync(worksheetText, masterServices, cancellationToken)).ToList();
                 }
             }
 
@@ -100,6 +105,21 @@ public sealed class ExcelStatementParser : IStatementParser
     public static MasterServicesContext? GetCurrentMasterServices()
     {
         return CurrentMasterServicesContext;
+    }
+
+    // Public helper to extract master services from raw spreadsheet bytes (used by reconcile processor)
+    public static MasterServicesContext? ExtractMasterServicesFromBytes(byte[] content)
+    {
+        try
+        {
+            using var ms = new MemoryStream(content);
+            using var workbook = new XLWorkbook(ms);
+            return ExtractMasterServices(workbook);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static MasterServicesContext? ExtractMasterServices(XLWorkbook workbook)
@@ -130,6 +150,7 @@ public sealed class ExcelStatementParser : IStatementParser
         }
 
         // Map column indices
+        var numberCol = 0;
         var serviceNameCol = 0;
         var billingCycleCol = 0;
         var billingDateCol = 0;
@@ -137,24 +158,30 @@ public sealed class ExcelStatementParser : IStatementParser
         var ccNumberCol = 0;
         var monthlyCostCol = 0;
 
+        var monthlyCostCandidates = new List<int>();
+
         foreach (var cell in headerRow.CellsUsed())
         {
-            var header = NormalizeToken(cell.GetString());
+            var header = NormalizeHeader(cell.GetString());
             if (string.IsNullOrWhiteSpace(header)) continue;
 
-            if (serviceNameCol == 0 && header.Contains("service name"))
+            if (serviceNameCol == 0 && header == "service name")
                 serviceNameCol = cell.Address.ColumnNumber;
-            else if (billingCycleCol == 0 && header.Contains("billing cycle"))
+            else if (billingCycleCol == 0 && header == "billing cycle")
                 billingCycleCol = cell.Address.ColumnNumber;
-            else if (billingDateCol == 0 && header.Contains("start date"))
+            else if (billingDateCol == 0 && header == "start date")
                 billingDateCol = cell.Address.ColumnNumber;
-            else if (paymentMethodCol == 0 && header.Contains("payment method") || header.Contains("account"))
+            else if (paymentMethodCol == 0 && header == "payment method")
                 paymentMethodCol = cell.Address.ColumnNumber;
-            else if (ccNumberCol == 0 && (header.Contains("cc number") || header.Contains("account")))
+            else if (ccNumberCol == 0 && header == "cc number")
                 ccNumberCol = cell.Address.ColumnNumber;
-            else if (monthlyCostCol == 0 && header.Contains("monthly") && header.Contains("idr"))
-                monthlyCostCol = cell.Address.ColumnNumber;
+            else if (HeaderLooksLikeIdrMonthlyCost(header))
+                monthlyCostCandidates.Add(cell.Address.ColumnNumber);
+            else if (numberCol == 0 && header == "no")
+                numberCol = cell.Address.ColumnNumber;
         }
+
+        monthlyCostCol = SelectBestIdrCostColumn(headerRow, usedRows, monthlyCostCandidates);
 
         // Extract data rows (credit card payments only)
         var dataRows = usedRows.Where(r => r.RowNumber() > headerRow.RowNumber());
@@ -163,7 +190,12 @@ public sealed class ExcelStatementParser : IStatementParser
             var serviceName = serviceNameCol > 0 ? row.Cell(serviceNameCol).GetString().Trim() : string.Empty;
             if (string.IsNullOrWhiteSpace(serviceName) || serviceName.Contains("Domain", StringComparison.OrdinalIgnoreCase))
                 continue;
-
+            int? parsedNumber = null;
+            if (numberCol > 0)
+            {
+                var noStr = row.Cell(numberCol).GetString().Trim();
+                if (int.TryParse(noStr, out var n)) parsedNumber = n;
+            }
             var paymentMethod = paymentMethodCol > 0 ? row.Cell(paymentMethodCol).GetString().Trim() : string.Empty;
             if (!paymentMethod.Equals("credit card", StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -188,13 +220,13 @@ public sealed class ExcelStatementParser : IStatementParser
                 }
             }
 
-            services.Add(new MasterService(serviceName, billingCycle, billingDate, paymentMethod, ccNumber, costIdr));
+            services.Add(new MasterService(parsedNumber, serviceName, billingCycle, billingDate, paymentMethod, ccNumber, costIdr));
         }
 
         return services.Count > 0 ? new MasterServicesContext(services.AsReadOnly()) : null;
     }
 
-    private static List<ParsedStatementRow> ParseIdrRowsFromWorksheet(IXLWorksheet worksheet)
+    private List<ParsedStatementRow> ParseIdrRowsFromWorksheet(IXLWorksheet worksheet)
     {
         var rows = new List<ParsedStatementRow>();
         var usedRows = worksheet.RowsUsed().ToList();
@@ -212,32 +244,54 @@ public sealed class ExcelStatementParser : IStatementParser
         var serviceNameColumn = 0;
         var monthlyIdrColumn = 0;
         var yearlyIdrColumn = 0;
+        var numberColumn = 0;
+        var paymentMethodColumn = 0;
 
         foreach (var cell in headerRow.CellsUsed())
         {
-            var header = NormalizeToken(cell.GetString());
+            var header = NormalizeHeader(cell.GetString());
             if (string.IsNullOrWhiteSpace(header))
             {
                 continue;
             }
 
-            if (serviceNameColumn == 0 && (header.Contains("service name") || header.Contains("description") || header.Contains("bill")))
+            if (serviceNameColumn == 0 && header == "service name")
             {
                 serviceNameColumn = cell.Address.ColumnNumber;
             }
 
-            if (monthlyIdrColumn == 0 && (header.Contains("monthly cost") && header.Contains("idr")))
+            if (monthlyIdrColumn == 0 && header == "monthly cost idr")
             {
                 monthlyIdrColumn = cell.Address.ColumnNumber;
             }
 
-            if (yearlyIdrColumn == 0 && (header.Contains("yearly cost") && header.Contains("idr")))
+            if (yearlyIdrColumn == 0 && header == "yearly cost idr")
             {
                 yearlyIdrColumn = cell.Address.ColumnNumber;
             }
+            if (numberColumn == 0 && header == "no")
+            {
+                numberColumn = cell.Address.ColumnNumber;
+            }
+
+            if (paymentMethodColumn == 0 && header == "payment method")
+            {
+                paymentMethodColumn = cell.Address.ColumnNumber;
+            }
         }
 
-        if (serviceNameColumn == 0 || (monthlyIdrColumn == 0 && yearlyIdrColumn == 0))
+        if (serviceNameColumn == 0 || monthlyIdrColumn == 0)
+        {
+            return rows;
+        }
+
+        var masterContext = GetCurrentMasterServices();
+        var allowedCreditCardNumbers = masterContext?.Services
+            .Where(service => service.Number.HasValue && string.Equals(service.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase))
+            .Select(service => service.Number!.Value)
+            .ToHashSet();
+
+        if (allowedCreditCardNumbers is { Count: > 0 } && numberColumn == 0)
         {
             return rows;
         }
@@ -250,7 +304,15 @@ public sealed class ExcelStatementParser : IStatementParser
             {
                 continue;
             }
-
+            // If the detail sheet contains an explicit Payment Method column, filter to Credit Card rows only
+            if (paymentMethodColumn > 0)
+            {
+                var pm = row.Cell(paymentMethodColumn).GetString().Trim();
+                if (!string.Equals(pm, "credit card", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+            }
             if (description.Contains("domain", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
@@ -264,6 +326,16 @@ public sealed class ExcelStatementParser : IStatementParser
             {
                 var yearlyText = row.Cell(yearlyIdrColumn).GetFormattedString();
                 if (!TryParseIdrAmount(yearlyText, out amount))
+                {
+                    continue;
+                }
+            }
+
+            // If we have page-1 master services, keep only rows whose No matches a credit-card service.
+            if (allowedCreditCardNumbers is { Count: > 0 } && numberColumn > 0)
+            {
+                var noStr = row.Cell(numberColumn).GetString().Trim();
+                if (!int.TryParse(noStr, out var no) || !allowedCreditCardNumbers.Contains(no))
                 {
                     continue;
                 }
@@ -289,6 +361,92 @@ public sealed class ExcelStatementParser : IStatementParser
         return hasService && (hasMonthlyIdr || hasYearlyIdr);
     }
 
+    private static bool HeaderLooksLikeIdrMonthlyCost(string header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        if (header.Contains("usd") || header.Contains("eur") || header.Contains("dollar") || header.Contains("euro"))
+        {
+            return false;
+        }
+
+        return header == "monthly cost idr";
+    }
+
+    private static int SelectBestIdrCostColumn(IXLRow headerRow, IReadOnlyList<IXLRow> usedRows, IReadOnlyList<int> candidateColumns)
+    {
+        if (candidateColumns.Count == 0)
+        {
+            return 0;
+        }
+
+        if (candidateColumns.Count == 1)
+        {
+            return candidateColumns[0];
+        }
+
+        var dataRows = usedRows.Where(row => row.RowNumber() > headerRow.RowNumber()).Take(12).ToList();
+        var scores = candidateColumns.ToDictionary(column => column, _ => 0);
+
+        foreach (var column in candidateColumns)
+        {
+            var values = new List<decimal>();
+            foreach (var row in dataRows)
+            {
+                var raw = row.Cell(column).GetFormattedString().Trim();
+                if (!TryParseIdrAmount(raw, out var amount))
+                {
+                    continue;
+                }
+
+                values.Add(amount);
+                if (raw.Contains(".") || raw.Contains(","))
+                {
+                    scores[column] += 1;
+                }
+
+                if (amount >= 1000m)
+                {
+                    scores[column] += 3;
+                }
+                else if (amount >= 100m)
+                {
+                    scores[column] += 1;
+                }
+                else
+                {
+                    scores[column] -= 2;
+                }
+            }
+
+            if (values.Count == 0)
+            {
+                scores[column] -= 10;
+                continue;
+            }
+
+            // Prefer columns with mostly larger whole-number style amounts
+            var average = values.Average();
+            if (average >= 1000m)
+            {
+                scores[column] += 5;
+            }
+            else if (average < 100m)
+            {
+                scores[column] -= 5;
+            }
+        }
+
+        return scores
+            .OrderByDescending(kv => kv.Value)
+            .ThenBy(kv => kv.Key)
+            .FirstOrDefault()
+            .Key;
+    }
+
     private static bool TryParseIdrAmount(string? raw, out decimal amount)
     {
         amount = 0m;
@@ -307,6 +465,19 @@ public sealed class ExcelStatementParser : IStatementParser
         if (string.IsNullOrWhiteSpace(digitsOnly))
         {
             return false;
+        }
+
+        // Reject decimal-style values such as 22.2 or 59.14; IDR amounts should be whole-number style.
+        var lastDot = digitsOnly.LastIndexOf('.');
+        var lastComma = digitsOnly.LastIndexOf(',');
+        var lastSeparator = Math.Max(lastDot, lastComma);
+        if (lastSeparator >= 0)
+        {
+            var fractionalPart = digitsOnly[(lastSeparator + 1)..];
+            if (fractionalPart.Length is 1 or 2)
+            {
+                return false;
+            }
         }
 
         // IDR commonly uses '.' as thousand separators. Remove separators and parse as whole amount.
@@ -410,5 +581,32 @@ public sealed class ExcelStatementParser : IStatementParser
     private static string NormalizeToken(string value)
     {
         return (value ?? string.Empty).Trim().ToLowerInvariant();
+    }
+
+    private static string NormalizeHeader(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(value.Length);
+        var previousWasSpace = false;
+
+        foreach (var ch in value.Trim().ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                builder.Append(ch);
+                previousWasSpace = false;
+            }
+            else if (!previousWasSpace)
+            {
+                builder.Append(' ');
+                previousWasSpace = true;
+            }
+        }
+
+        return builder.ToString().Trim();
     }
 }
