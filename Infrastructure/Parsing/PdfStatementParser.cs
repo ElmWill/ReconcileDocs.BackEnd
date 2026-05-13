@@ -82,6 +82,7 @@ public sealed class PdfStatementParser : IStatementParser
         var modelRows = await _modelExtractor.ExtractTransactionsWithContextAsync(
             string.Join("\n", extractedLines), 
             ExcelStatementParser.GetCurrentMasterServices(), 
+            StatementSourceKind.Pdf,
             cancellationToken);
         _lastTrace = new PdfParseTrace(extractedLines.Count, ocrLineCount, modelRows.Count);
         if (modelRows.Count > 0)

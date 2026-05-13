@@ -13,6 +13,9 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
     private readonly IConfiguration _configuration;
     private readonly ILogger<OllamaStatementModelExtractor> _logger;
     private readonly ILastModelResponseStore _lastResponseStore;
+    
+    // Track "no" values from latest extraction for post-filtering
+    private Dictionary<int, int?>? _lastExtractedNos;
 
     public OllamaStatementModelExtractor(HttpClient httpClient, IConfiguration configuration, ILogger<OllamaStatementModelExtractor> logger, ILastModelResponseStore lastResponseStore)
     {
@@ -33,10 +36,10 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
 
     public async Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsAsync(string documentText, CancellationToken cancellationToken = default)
     {
-        return await ExtractTransactionsWithContextAsync(documentText, null, cancellationToken);
+        return await ExtractTransactionsWithContextAsync(documentText, null, StatementSourceKind.Pdf, cancellationToken);
     }
 
-    public async Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, StatementSourceKind sourceKind = StatementSourceKind.Pdf, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(documentText))
         {
@@ -46,7 +49,21 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
         // Allow up to 500KB of text for better extraction of large spreadsheets
         var trimmedText = documentText.Length > 500000 ? documentText[..500000] : documentText;
 
-        var prompt = BuildPrompt(trimmedText, masterServices);
+        // Log what we're working with
+        _logger.LogInformation("ExtractTransactionsWithContextAsync: sourceKind={SourceKind}, masterServices count={MasterServicesCount}", sourceKind, masterServices?.Services.Count ?? 0);
+        List<int> whitelistedNos = new();
+        if (masterServices?.Services.Count > 0)
+        {
+            whitelistedNos = masterServices.Services
+                .Where(s => s.Number.HasValue && string.Equals(s.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase))
+                .Select(s => s.Number!.Value)
+                .Distinct()
+                .ToList();
+            _logger.LogInformation("Credit-card service numbers from master services: {CreditCardNumbers}", string.Join(", ", whitelistedNos));
+        }
+        
+        var prompt = BuildPrompt(trimmedText, masterServices, sourceKind);
+        _logger.LogDebug("Full prompt:\n{Prompt}", prompt);
 
         try
         {
@@ -74,7 +91,20 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
                 return Array.Empty<ParsedStatementRow>();
             }
 
-            return ParseModelRowsFromResponse(responseText);
+            _logger.LogDebug("Model response (first 500 chars):\n{Response}", responseText.Substring(0, Math.Min(500, responseText.Length)));
+            var parsedRows = ParseModelRowsFromResponse(responseText);
+            _logger.LogInformation("Model extracted {RowCount} rows for sourceKind={SourceKind}", parsedRows.Count, sourceKind);
+            
+            // For spreadsheets, apply post-filtering by page-1 No whitelist
+            if (sourceKind == StatementSourceKind.Spreadsheet && whitelistedNos.Count > 0)
+            {
+                _logger.LogInformation("Applying post-filter: keeping only rows with No in whitelist {WhitelistedNos}", string.Join(", ", whitelistedNos));
+                var filteredRows = ApplyWhitelistFilter(parsedRows, whitelistedNos);
+                _logger.LogInformation("After whitelist filter: {FilteredRowCount} rows (reduced from {OriginalRowCount})", filteredRows.Count, parsedRows.Count);
+                return filteredRows;
+            }
+            
+            return parsedRows;
         }
         catch (Exception ex)
         {
@@ -88,7 +118,7 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
         return _configuration["Ollama:Model"] ?? "gemma4:e4b";
     }
 
-    private static string BuildPrompt(string text, MasterServicesContext? masterServices = null)
+    private static string BuildPrompt(string text, MasterServicesContext? masterServices = null, StatementSourceKind sourceKind = StatementSourceKind.Pdf)
     {
         var masterServicesSection = string.Empty;
         if (masterServices?.Services.Count > 0)
@@ -104,22 +134,58 @@ public sealed class OllamaStatementModelExtractor : IStatementModelExtractor
                 masterServicesSection = "\n\nREFERENCE SERVICES (from master billing list):\nOnly include rows whose No matches one of the credit-card service numbers below. Skip every other row.\n"
                     + "Credit-card service numbers: " + string.Join(", ", creditCardNumbers) + "\n"
                     + "Do not use service names to decide inclusion. Only output rows belonging to the allowed credit-card service numbers.";
+                // Logging would happen here in ExtractTransactionsWithContextAsync which has access to ILogger
             }
         }
 
-        return @"You are an AI expert tasked with extracting structured transaction data from credit card statements and billing tables.
+        var sourceInstructions = sourceKind == StatementSourceKind.Spreadsheet
+            ? @"You are extracting rows from a spreadsheet billing sheet.
+
+CRITICAL INSTRUCTIONS:
+- IMPORTANT: Extract the row No value from the spreadsheet for each transaction.
+- Respond ONLY with valid JSON. Do not include any additional commentary, markdown, code fences, or explanations.
+
+RULES FOR PARSING:
+- Analyze only the provided spreadsheet text.
+- Preserve the original row order as it appears in the sheet.
+- Prefer the service name plus the IDR amount column only.
+- If multiple currency columns exist, ignore USD, EUR, dollar, euro, and any non-IDR price columns.
+- When extracting from a billing sheet, use Monthly Cost (IDR) first and Yearly Cost (IDR) only as a fallback when Monthly Cost (IDR) is missing or blank.
+- Never choose a smaller decimal-style value like 22.2 or 59.14 when an IDR whole-number amount exists in the same row.
+- This sheet may be OCR-extracted as separated columns instead of clean rows.
+- When the text is column-split, reconstruct each row by following the visible sequence of entries in order.
+- Do not merge unrelated descriptions, and do not reassign an amount to a different row.
+- If a description is incomplete, keep the exact merchant/reference text that is visible.
+- Never guess, merge, or reassign amounts to a different row.
+- Ignore headers, footers, legal text, page numbers, summary rows, balance rows, and minimum payment rows.
+- IMPORTANT: Exclude/skip any rows where the category or description contains ""Domain"".
+- Return an empty array ONLY if genuinely no matching rows are found.
+- amount must be positive for charges and negative for refunds or credits.
+- Use a dot as the decimal separator and omit currency symbols or thousand separators.
+
+EXPECTED JSON STRUCTURE:
+{
+    ""transactions"": [
+        {
+            ""no"": number,
+            ""date"": ""YYYY-MM-DD or null"",
+            ""description"": ""string"",
+            ""amount"": number
+        }
+    ]
+}
+
+Reference note:
+The spreadsheet may include separate blocks for row numbers, service names, payment methods, and amounts. Extract the row number (No) from each row."
+            : @"You are an AI expert tasked with extracting structured transaction data from credit card statements.
 
 CRITICAL INSTRUCTIONS:
 - EXTRACT EVERY SINGLE TRANSACTION without omitting any rows (no sampling, no filtering for ""important"" ones).
-- Respond ONLY with valid JSON. Do not include any additional commentary, markdown, code fences, or explanations." + masterServicesSection + @"
+- Respond ONLY with valid JSON. Do not include any additional commentary, markdown, code fences, or explanations.
 
 RULES FOR PARSING:
 - Analyze only the provided statement text.
 - Preserve the original transaction order as it appears in the document.
-    - If the text looks like a billing sheet or service table, prefer the service name plus the IDR amount column only.
-    - If multiple currency columns exist, ignore USD, EUR, dollar, euro, and any non-IDR price columns.
-    - When extracting from a billing sheet, use Monthly Cost (IDR) first and Yearly Cost (IDR) only as a fallback when Monthly Cost (IDR) is missing or blank.
-    - Never choose a smaller decimal-style value like 22.2 or 59.14 when an IDR whole-number amount exists in the same row.
 - This statement may be OCR-extracted as separated columns instead of clean rows.
 - When the text is column-split, reconstruct each transaction by following the visible sequence of entries in order, not by trying to infer relationships from nearby words.
 - Do not merge unrelated descriptions, and do not reassign an amount to a different merchant.
@@ -146,13 +212,12 @@ EXPECTED JSON STRUCTURE:
 }
 
 REFERENCE NOTE:
-The statement text may include separate blocks for transaction dates, posting dates, descriptions, and amounts. In that case, treat them as one table and keep the row order aligned by position. Ensure you extract ALL data rows, not just a sample.
+The statement text may include separate blocks for transaction dates, posting dates, descriptions, and amounts. In that case, treat them as one table and keep the row order aligned by position. Ensure you extract ALL data rows, not just a sample.";
 
-Statement text:
-" + text;
+        return sourceInstructions + masterServicesSection + "\n\nStatement text:\n" + text;
     }
 
-    private static IReadOnlyList<ParsedStatementRow> ParseModelRowsFromResponse(string responseText)
+    private IReadOnlyList<ParsedStatementRow> ParseModelRowsFromResponse(string responseText)
     {
         var cleanedJson = ExtractJsonPayload(responseText);
         using var doc = JsonDocument.Parse(cleanedJson);
@@ -187,6 +252,7 @@ Statement text:
 
         var rows = new List<ParsedStatementRow>();
         var rowNumber = 0;
+        var noValues = new Dictionary<int, int?>(); // Track row index -> No value from JSON
 
         foreach (var item in transactions.EnumerateArray())
         {
@@ -213,9 +279,25 @@ Statement text:
             }
 
             var date = TryReadDate(item);
+            
+            // Try to extract the "no" field if present
+            int? noValue = null;
+            if (item.TryGetProperty("no", out var noEl) && noEl.ValueKind == JsonValueKind.Number)
+            {
+                if (noEl.TryGetInt32(out var noInt))
+                {
+                    noValue = noInt;
+                }
+            }
+            
             rowNumber++;
             rows.Add(new ParsedStatementRow(rowNumber, description, amount, date));
+            noValues[rowNumber - 1] = noValue;
         }
+
+        // Store extracted no values for post-filtering
+        _lastExtractedNos = noValues;
+        _logger.LogDebug("Parsed {RowCount} rows with no values: {NoValues}", rows.Count, string.Join(", ", noValues.Where(kv => kv.Value.HasValue).Select(kv => $"{kv.Key}={kv.Value}")));
 
         return rows;
     }
@@ -352,6 +434,33 @@ Statement text:
         }
 
         return null;
+    }
+
+    private List<ParsedStatementRow> ApplyWhitelistFilter(IReadOnlyList<ParsedStatementRow> rows, List<int> whitelistedNos)
+    {
+        if (_lastExtractedNos == null || _lastExtractedNos.Count == 0)
+        {
+            _logger.LogWarning("No extracted 'no' values found in model response, cannot apply whitelist filter. Returning all {RowCount} rows.", rows.Count);
+            return new List<ParsedStatementRow>(rows);
+        }
+
+        var filtered = new List<ParsedStatementRow>();
+        
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (_lastExtractedNos.TryGetValue(i, out var noValue) && noValue.HasValue && whitelistedNos.Contains(noValue.Value))
+            {
+                filtered.Add(rows[i]);
+                _logger.LogDebug("Keeping row {Index} with No={NoValue}: {Description}", i, noValue.Value, rows[i].Description);
+            }
+            else
+            {
+                var extractedNo = _lastExtractedNos.TryGetValue(i, out var val) ? val?.ToString() ?? "null" : "unknown";
+                _logger.LogDebug("Filtering out row {Index} with No={NoValue}: {Description}", i, extractedNo, rows[i].Description);
+            }
+        }
+        
+        return filtered;
     }
 
     private sealed record OllamaGenerateRequest(string Model, string Prompt, bool Stream, string Format, OllamaOptions Options);

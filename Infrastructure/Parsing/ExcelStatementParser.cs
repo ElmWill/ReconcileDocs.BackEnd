@@ -58,6 +58,12 @@ public sealed class ExcelStatementParser : IStatementParser
         
         // Extract master services context from "List active biling" sheet for use in PDF reconciliation
         var masterServices = ExtractMasterServices(workbook);
+        _logger.LogInformation("Excel parser: extracted masterServices with {ServiceCount} services", masterServices?.Services.Count ?? 0);
+        if (masterServices?.Services.Count > 0)
+        {
+            var ccServices = masterServices.Services.Where(s => string.Equals(s.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase)).ToList();
+            _logger.LogInformation("Credit-card services: {CreditCardServiceCount} services with No values: {NoValues}", ccServices.Count, string.Join(", ", ccServices.Where(s => s.Number.HasValue).Select(s => s.Number!.Value)));
+        }
         
         // Store in a thread-local or context variable so PdfStatementParser can access it
         // For now, we'll store it in a static field that gets cleared after use
@@ -66,23 +72,16 @@ public sealed class ExcelStatementParser : IStatementParser
         try
         {
             var worksheet = SelectWorksheet(workbook);
-            var allowedCreditCardNumbers = masterServices?.Services
-                .Where(service => service.Number.HasValue && string.Equals(service.PaymentMethod, "credit card", StringComparison.OrdinalIgnoreCase))
-                .Select(service => service.Number!.Value)
-                .ToHashSet();
+            var worksheetText = ExtractWorksheetText(worksheet);
 
-            var parsedRows = ParseIdrRowsFromWorksheet(worksheet);
-
-            // Prefer deterministic IDR parsing; fallback to LLM only when header mapping fails.
-            if (parsedRows.Count == 0 && !(allowedCreditCardNumbers?.Count > 0))
+            if (string.IsNullOrWhiteSpace(worksheetText))
             {
-                var worksheetText = ExtractWorksheetText(worksheet);
-                if (!string.IsNullOrWhiteSpace(worksheetText))
-                {
-                    _logger.LogInformation("Excel deterministic parsing returned no rows for worksheet {WorksheetName}. Falling back to model extraction.", worksheet.Name);
-                    parsedRows = (await _modelExtractor.ExtractTransactionsWithContextAsync(worksheetText, masterServices, cancellationToken)).ToList();
-                }
+                _logger.LogInformation("Excel worksheet {WorksheetName} did not yield any text for model extraction.", worksheet.Name);
+                yield break;
             }
+
+            _logger.LogInformation("Excel parsing is running in model-only mode for worksheet {WorksheetName}.", worksheet.Name);
+            var parsedRows = (await _modelExtractor.ExtractTransactionsWithContextAsync(worksheetText, masterServices, StatementSourceKind.Spreadsheet, cancellationToken)).ToList();
 
             var rowNumber = 0;
             foreach (var row in parsedRows)
@@ -129,11 +128,15 @@ public sealed class ExcelStatementParser : IStatementParser
         
         if (listSheet is null)
         {
+            var allSheetNames = string.Join(", ", workbook.Worksheets.Select(ws => $"\"{ws.Name}\""));
+            // Log sheet names for debugging
+            System.Diagnostics.Debug.WriteLine($"DEBUG: Could not find 'List active biling' sheet. Available sheets: {allSheetNames}");
             return null;
         }
 
         var services = new List<MasterService>();
         var usedRows = listSheet.RowsUsed().ToList();
+        System.Diagnostics.Debug.WriteLine($"DEBUG: Found 'List active biling' sheet with {usedRows.Count} rows");
         
         if (usedRows.Count == 0)
         {
@@ -142,19 +145,29 @@ public sealed class ExcelStatementParser : IStatementParser
 
         // Find header row
         var headerRow = usedRows.FirstOrDefault(row => 
-            row.CellsUsed().Any(cell => NormalizeToken(cell.GetString()).Contains("service name")));
+            row.CellsUsed().Any(cell => 
+                NormalizeToken(cell.GetString()).Contains("service name") ||
+                NormalizeToken(cell.GetString()).Contains("no")));
         
         if (headerRow is null)
         {
+            System.Diagnostics.Debug.WriteLine("DEBUG: Could not find header row with 'service name' or 'no' token");
+            // Debug: print first few rows to see what we're looking at
+            foreach (var row in usedRows.Take(3))
+            {
+                var cellTexts = string.Join(" | ", row.CellsUsed().Select(c => c.GetString()));
+                System.Diagnostics.Debug.WriteLine($"DEBUG: Row {row.RowNumber()}: {cellTexts}");
+            }
             return null;
         }
+        
+        System.Diagnostics.Debug.WriteLine($"DEBUG: Found header row at row {headerRow.RowNumber()}");
 
         // Map column indices
         var numberCol = 0;
         var serviceNameCol = 0;
         var billingCycleCol = 0;
         var billingDateCol = 0;
-        var paymentMethodCol = 0;
         var ccNumberCol = 0;
         var monthlyCostCol = 0;
 
@@ -171,8 +184,6 @@ public sealed class ExcelStatementParser : IStatementParser
                 billingCycleCol = cell.Address.ColumnNumber;
             else if (billingDateCol == 0 && header == "start date")
                 billingDateCol = cell.Address.ColumnNumber;
-            else if (paymentMethodCol == 0 && header == "payment method")
-                paymentMethodCol = cell.Address.ColumnNumber;
             else if (ccNumberCol == 0 && header == "cc number")
                 ccNumberCol = cell.Address.ColumnNumber;
             else if (HeaderLooksLikeIdrMonthlyCost(header))
@@ -183,22 +194,35 @@ public sealed class ExcelStatementParser : IStatementParser
 
         monthlyCostCol = SelectBestIdrCostColumn(headerRow, usedRows, monthlyCostCandidates);
 
+        System.Diagnostics.Debug.WriteLine($"DEBUG: Column mapping - No={numberCol}, ServiceName={serviceNameCol}, BillingCycle={billingCycleCol}, StartDate={billingDateCol}, CcNumber={ccNumberCol}, MonthlyCost={monthlyCostCol}");
+
         // Extract data rows (credit card payments only)
-        var dataRows = usedRows.Where(r => r.RowNumber() > headerRow.RowNumber());
+        var dataRows = usedRows.Where(r => r.RowNumber() > headerRow.RowNumber()).ToList();
+        System.Diagnostics.Debug.WriteLine($"DEBUG: Found {dataRows.Count} data rows after header");
+        
+        int includedCount = 0;
+        int excludedDomain = 0;
+        
         foreach (var row in dataRows)
         {
             var serviceName = serviceNameCol > 0 ? row.Cell(serviceNameCol).GetString().Trim() : string.Empty;
-            if (string.IsNullOrWhiteSpace(serviceName) || serviceName.Contains("Domain", StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(serviceName))
+            {
+                excludedDomain++;
                 continue;
+            }
+            if (serviceName.Contains("Domain", StringComparison.OrdinalIgnoreCase))
+            {
+                excludedDomain++;
+                continue;
+            }
             int? parsedNumber = null;
             if (numberCol > 0)
             {
                 var noStr = row.Cell(numberCol).GetString().Trim();
                 if (int.TryParse(noStr, out var n)) parsedNumber = n;
             }
-            var paymentMethod = paymentMethodCol > 0 ? row.Cell(paymentMethodCol).GetString().Trim() : string.Empty;
-            if (!paymentMethod.Equals("credit card", StringComparison.OrdinalIgnoreCase))
-                continue;
+            includedCount++;
 
             var billingCycle = billingCycleCol > 0 ? row.Cell(billingCycleCol).GetString().Trim() : null;
             var billingDateStr = billingDateCol > 0 ? row.Cell(billingDateCol).GetString().Trim() : null;
@@ -220,8 +244,10 @@ public sealed class ExcelStatementParser : IStatementParser
                 }
             }
 
-            services.Add(new MasterService(parsedNumber, serviceName, billingCycle, billingDate, paymentMethod, ccNumber, costIdr));
+                    services.Add(new MasterService(parsedNumber, serviceName, billingCycle, billingDate, "credit card", ccNumber, costIdr));
         }
+
+        System.Diagnostics.Debug.WriteLine($"DEBUG: Master services extraction complete - included={includedCount}, excluded(domain)={excludedDomain}, total={services.Count}");
 
         return services.Count > 0 ? new MasterServicesContext(services.AsReadOnly()) : null;
     }

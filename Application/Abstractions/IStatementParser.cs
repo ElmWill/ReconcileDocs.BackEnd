@@ -20,7 +20,13 @@ public interface IStatementParserResolver
 public interface IStatementModelExtractor
 {
     Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsAsync(string documentText, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ParsedStatementRow>> ExtractTransactionsWithContextAsync(string documentText, MasterServicesContext? masterServices = null, StatementSourceKind sourceKind = StatementSourceKind.Pdf, CancellationToken cancellationToken = default);
+}
+
+public enum StatementSourceKind
+{
+    Pdf = 1,
+    Spreadsheet = 2
 }
 
 public sealed record MasterService(int? Number, string ServiceName, string? BillingCycle, DateTime? BillingDate, string? PaymentMethod, string? CcNumber, decimal? CostIdr);
